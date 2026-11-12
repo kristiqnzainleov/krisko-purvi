@@ -27,9 +27,17 @@ def reply_stream(message: str, context=None):
         prompt = [tokenizer.user] + before_q + [tokenizer.bot] + before_a
     prompt += [tokenizer.user] + tokenizer.encode(message.strip().lower()[:60]) + [tokenizer.bot]
     # При сметки няма място за случайност: взима се винаги най-вероятният символ.
-    top_p = None if any(ch.isdigit() for ch in message) else TOP_P
+    is_math = any(ch.isdigit() for ch in message) or any(w in message.lower() for w in ("плюс", "минус", "делено"))
+    top_p = None if is_math else TOP_P
+    drafting = False      # при сметки моделът първо пише чернова в [скоби]; тя не се показва
     for token in model.stream(prompt, tokenizer.eos, top_p=top_p):
-        yield tokenizer.decode([token])
+        piece = tokenizer.decode([token])
+        if piece == "[":
+            drafting = True
+        elif piece == "]":
+            drafting = False
+        elif not drafting:
+            yield piece
 
 
 def reply(message: str, context=None) -> str:

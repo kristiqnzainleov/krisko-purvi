@@ -9,6 +9,7 @@ import json
 import math
 import os
 import random
+import re
 import sys
 
 import torch
@@ -331,40 +332,78 @@ def introduction():
 
 singles += [introduction() for _ in range(1800)]
 
-# Математика: събиране и изваждане с числа от 0 до 99, умножение до 12 по 12 и деление без остатък.
-# Част от примерите за събиране и изваждане се пазят настрана (HELD_OUT) и моделът никога не ги
-# вижда – с тях накрая се проверява дали наистина смята, а не помни наизуст.
+# Математика: събиране и изваждане с числа до 999, умножение (до 20 по 20 и двуцифрено по число
+# до 12) и деление без остатък.
+#
+# Чернова: преди отговора моделът пише резултата отзад напред в квадратни скоби, например
+# "[58]47 плюс 38 е 85." Така смята както на лист – първо единиците, после десетиците с преноса.
+# Черновата не се показва на екрана (chat.py и krisko.js я скриват).
+#
+# Част от примерите се пазят настрана (HELD_OUT) и моделът никога не ги вижда – с тях накрая
+# се проверява дали наистина смята, а не помни наизуст.
 MATH = {   # знак -> (дума в отговора, начини на изписване, действие)
     "+": ("плюс", ["+", "+", "плюс"], lambda a, b: a + b),
     "-": ("минус", ["-", "-", "минус"], lambda a, b: a - b),
     "*": ("по", ["по", "по", "*", "x"], lambda a, b: a * b),
     "/": ("делено на", ["/", ":", ":", "делено на", "разделено на"], lambda a, b: a // b),
 }
-ASK = ["колко е ", "колко е ", "колко е ", "колко прави ", "сметни ", "пресметни ", "", "", "колко са "]
+ASK = ["колко е ", "колко е ", "колко е ", "колко прави ", "сметни ", "пресметни ", "", "", "", "колко са "]
+NUMBER_WORDS = ["нула", "едно", "две", "три", "четири", "пет", "шест", "седем", "осем", "девет", "десет"]
 
 
-def math_example(op, a, b):
-    word, signs, compute = MATH[op]
-    sign = random.choice(signs)
-    tight = len(sign) == 1 and sign != "x" and random.random() < 0.4      # "7+8" без интервали
+def math_answer(op, a, b):
+    word, _, compute = MATH[op]
+    result = compute(a, b)
+    draft = ("-" if result < 0 else "") + str(abs(result))[::-1]
+    return f"[{draft}]{a} {word} {b} е {result}."
+
+
+def math_example(op, a, b, plain=False):
+    sign = random.choice(MATH[op][1])
+    tight = len(sign) == 1 and sign != "x" and random.random() < 0.45     # "7+8" без интервали
     expr = f"{a}{sign}{b}" if tight else f"{a} {sign} {b}"
-    q = random.choice(ASK) + expr + random.choice(["", "", "", " =", "="])
-    return (vary(q, True, typos=False), f"{a} {word} {b} е {compute(a, b)}.", "сметка")
+    q = random.choice(ASK) + expr + random.choice(["", "", "", "", " =", "=", "?", "=?"])
+    return (q if plain else vary(q, True, typos=False), math_answer(op, a, b), "сметка")
+
+
+def random_pair(limit):
+    return random.randint(0, limit), random.randint(0, limit)
 
 
 pairs_99 = [(a, b) for a in range(100) for b in range(100)]
 random.shuffle(pairs_99)
-HELD_OUT = {"+": pairs_99[:300], "-": pairs_99[300:600]}
+times_pairs = sorted({(a, b) for a in range(21) for b in range(21)}
+                     | {p for a in range(100) for b in range(13) for p in ((a, b), (b, a))}
+                     | {p for a in range(100, 1001, 100) for b in range(13) for p in ((a, b), (b, a))})
+random.shuffle(times_pairs)
+HELD_OUT = {"+": pairs_99[:300], "-": pairs_99[300:600],
+            "*": [p for p in times_pairs if max(p) > 20][:150]}
+hidden = {op: set(pairs) for op, pairs in HELD_OUT.items()}
+
 for op in "+-":
-    hidden = set(HELD_OUT[op])
-    seen = [p for p in pairs_99 if p not in hidden]
-    singles += [math_example(op, *random.choice(seen)) for _ in range(11000 if op == "+" else 18000)]
-    singles += [math_example(op, a, b) for a in range(11) for b in range(11) if (a, b) not in hidden for _ in range(4)]
-for a in range(13):
-    for b in range(13):
-        singles += [math_example("*", a, b) for _ in range(10)]
-        if b > 0:
-            singles += [math_example("/", a * b, b) for _ in range(14)]
+    count = 0
+    while count < 46000:                               # половината с числа до 99, другата до 999
+        pair = random_pair(99 if random.random() < 0.5 else 999)
+        if pair not in hidden[op]:
+            singles.append(math_example(op, *pair))
+            count += 1
+for a, b in times_pairs:
+    if (a, b) in hidden["*"]:
+        continue
+    singles += [math_example("*", a, b) for _ in range(7)]
+    if b > 0:
+        singles += [math_example("/", a * b, b) for _ in range(4)]
+for a in range(21):                                    # малките числа и в най-голия вид: "2+2"
+    for b in range(21):
+        for op in "+-*":
+            if (a, b) not in hidden.get(op, ()):
+                singles += [math_example(op, a, b, plain=True) for _ in range(5)]
+for a in range(11):                                    # "две плюс две"
+    for b in range(11):
+        for op in "+-*":
+            q = f"{NUMBER_WORDS[a]} {MATH[op][0]} {NUMBER_WORDS[b]}"
+            singles += [(vary(random.choice(["колко е ", "колко е ", "колко прави ", ""]) + q, True, typos=False),
+                         math_answer(op, a, b), "сметка") for _ in range(4)]
 
 # ---- 1б. Контекст: отговорът зависи и от предишната размяна ----------------
 # Пример за обучение: (предишна размяна или None, въпрос, отговор)
@@ -488,7 +527,7 @@ def encode_prompt(q, ctx=None):
     return before + [tokenizer.user] + tokenizer.encode(q) + [tokenizer.bot]
 
 
-inputs, targets = [], []
+inputs, targets, is_math = [], [], []
 for ctx, q, a in examples:
     question = encode_prompt(q, ctx)
     answer = tokenizer.encode(a) + [tokenizer.eos]
@@ -496,12 +535,16 @@ for ctx, q, a in examples:
     if len(row) > config["block_size"]:
         continue
     pad = config["block_size"] - len(row)
+    is_math.append(a.startswith("["))
     inputs.append(row[:-1] + [tokenizer.pad] * (pad + 1))
     # Учим само отговора: върху въпроса и празното място няма оценка (-100).
     targets.append([-100] * (len(question) - 1) + answer + [-100] * (pad + 1))
 device = "mps" if torch.backends.mps.is_available() else "cpu"   # GPU-то на Mac, ако го има
 inputs, targets = torch.tensor(inputs, device=device), torch.tensor(targets, device=device)
 lengths = (inputs != tokenizer.pad).sum(1)
+# Сметките са много повече от репликите. За да не ги изместят, 30% от всяка порция са реплики.
+is_math = torch.tensor(is_math)
+weights = torch.where(is_math, 0.7 / max(int(is_math.sum()), 1), 0.3 / max(int((~is_math).sum()), 1))
 
 # ---- 3. Модел ---------------------------------------------------------------
 model = model.to(device)
@@ -517,7 +560,7 @@ for step in range(1, STEPS + 1):
     for group in opt.param_groups:                     # скоростта на учене плавно намалява
         group["lr"] = LR * min(1.0, step / 100) * (0.05 + 0.95 * 0.5 * (1 + math.cos(math.pi * step / STEPS)))
     # Взимаме повече примери и от тях избираме близки по дължина, за да няма много празно място.
-    pool = torch.randint(0, len(inputs), (BATCH * 6,), device=device)
+    pool = torch.multinomial(weights, BATCH * 6, replacement=True).to(device)
     pool = pool[lengths[pool].argsort()]
     start = int(torch.randint(0, BATCH * 5 + 1, (1,)))
     pick = pool[start:start + BATCH]
@@ -527,7 +570,7 @@ for step in range(1, STEPS + 1):
     torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
     opt.step()
     opt.zero_grad()
-    if step % 2000 == 0:
+    if step % 5000 == 0:
         print(f"стъпка {step:4d}  loss {loss.item():.4f}", flush=True)
 
 # ---- 5. Запис ---------------------------------------------------------------
@@ -592,7 +635,8 @@ CONTEXT_TESTS = [   # (предишен въпрос, предишен отго�
 
 
 def ask(q, ctx=None):
-    return tokenizer.decode(model.generate(encode_prompt(q, ctx), tokenizer.eos))
+    text = tokenizer.decode(model.generate(encode_prompt(q, ctx), tokenizer.eos))
+    return re.sub(r"\[[^\]]*\]?", "", text)             # без черновата в скоби
 
 
 right = total = 0
@@ -623,21 +667,32 @@ if WITH_CONTEXT:
     print(f"Въпроси с контекст: {right}/{len(CONTEXT_TESTS)} верни")
 
 # ---- 7. Математика ----------------------------------------------------------
-def math_score(op, pairs):
-    word, _, compute = MATH["/" if op == ":" else op]
-    sign = {"+": "+", "-": "-", "*": "по", "/": "делено на", ":": ":"}[op]
+def math_score(op, pairs, sign=None):
+    word, _, compute = MATH[op]
+    sign = sign or {"+": "+", "-": "-", "*": "по", "/": "делено на"}[op]
     wrong = [(a, b) for a, b in pairs if ask(f"колко е {a} {sign} {b}") != f"{a} {word} {b} е {compute(a, b)}."]
     return len(pairs) - len(wrong), len(pairs), wrong[:4]
 
 
-table = [(a, b) for a in range(13) for b in range(13)]
-for label, op, pairs in (
-    ("Събиране до 99, невиждани примери", "+", HELD_OUT["+"]),
-    ("Изваждане до 99, невиждани примери", "-", HELD_OUT["-"]),
-    ("Умножение до 12 по 12", "*", table),
-    ("Деление без остатък", "/", [(a * b, b) for a, b in table if b > 0]),
-    ("Деление, изписано с двоеточие", ":", [(a * b, b) for a, b in table if b > 0]),
-    ("Събиране с трицифрени числа (не е учено)", "+", [(random.randint(100, 999), random.randint(0, 999)) for _ in range(100)]),
+random.seed(123)
+small = [(a, b) for a in range(21) for b in range(21)]
+exact = [(a * b, b) for a, b in random.sample(times_pairs, 300) if b > 0]
+for label, op, pairs, sign in (
+    ("Събиране до 99, невиждани примери", "+", HELD_OUT["+"], None),
+    ("Изваждане до 99, невиждани примери", "-", HELD_OUT["-"], None),
+    ("Събиране до 999, случайни примери", "+", [random_pair(999) for _ in range(300)], None),
+    ("Изваждане до 999, случайни примери", "-", [random_pair(999) for _ in range(300)], None),
+    ("Умножение до 20 по 20", "*", small, None),
+    ("Умножение на двуцифрено, невиждани примери", "*", HELD_OUT["*"], None),
+    ("Деление без остатък", "/", exact, None),
+    ("Деление, изписано с двоеточие", "/", exact, ":"),
+    ("Числа над 999 (не е учено)", "+", [(random.randint(1000, 9999), random.randint(0, 9999)) for _ in range(100)], None),
 ):
-    good, count, wrong = math_score(op, pairs)
+    good, count, wrong = math_score(op, pairs, sign)
     print(f"{label}: {good}/{count} верни" + (f"   грешни например: {wrong}" if wrong else ""))
+
+everyday = {"2+2": 4, "1+1": 2, "2+2=?": 4, "100+100": 200, "1000-1": 999, "колко е 15 по 15": 225, "20 по 5": 100,
+            "колко е 100 - 50": 50, "99 - 100": -1, "колко е две плюс две": 4, "45+55": 100, "10/2": 5, "колко е 7x8": 56,
+            "250 + 250": 500, "колко е 12 по 11": 132, "144:12": 12, "3*3": 9, "колко е 500-250": 250, "81/9": 9, "6*7=": 42}
+wrong = {q: ask(q) for q, result in everyday.items() if not ask(q).endswith(f" е {result}.")}
+print(f"Всекидневни сметки: {len(everyday) - len(wrong)}/{len(everyday)} верни" + (f"   грешни: {wrong}" if wrong else ""))
