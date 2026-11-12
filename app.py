@@ -10,7 +10,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from chat import model, reply_stream
 
-HOST, PORT = "127.0.0.1", 7860
+# По подразбиране е достъпен само от този компютър.
+HOST, PORT = os.environ.get("HOST", "127.0.0.1"), int(os.environ.get("PORT", 7860))
 with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "avatar.png"), "rb") as f:
     AVATAR = f.read()
 
@@ -134,7 +135,7 @@ PAGE = r"""<!DOCTYPE html>
     <img class="avatar" src="/avatar.png" alt="">
     <div class="who">
       <b>Криско Първи</b>
-      <span>__PARAMS__ параметъра · работи локално</span>
+      <span>__PARAMS__ параметъра · __WHERE__</span>
     </div>
     <button class="ghost" id="reset" type="button">Нов чат</button>
   </div>
@@ -169,6 +170,22 @@ PAGE = r"""<!DOCTYPE html>
   let previous = null;         // предишната размяна {question, answer} – контекстът за модела
 
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+  // Откъде идва отговорът: от сървъра (app.py) или, в статичната версия, от модела в браузъра (krisko.js).
+  async function* fromServer(message, previous) {
+    const res = await fetch('/api/chat', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ message, previous }),
+    });
+    if (!res.ok || !res.body) throw new Error('HTTP ' + res.status);
+    const stream = res.body.getReader(), decoder = new TextDecoder();
+    for (;;) {
+      const { value, done } = await stream.read();
+      if (done) break;
+      yield decoder.decode(value, { stream: true });
+    }
+  }
+  const source = window.kriskoReply || fromServer;
 
   // Началният текст се изписва буква по буква.
   const HINT = 'Започнете разговор с Криско Първи';
@@ -218,17 +235,7 @@ PAGE = r"""<!DOCTYPE html>
     let queue = '', done = false, failed = false, shown = '';
     const reader = (async () => {
       try {
-        const res = await fetch('/api/chat', {
-          method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ message, previous }),
-        });
-        if (!res.ok || !res.body) throw new Error('HTTP ' + res.status);
-        const stream = res.body.getReader(), decoder = new TextDecoder();
-        for (;;) {
-          const { value, done: end } = await stream.read();
-          if (end) break;
-          queue += decoder.decode(value, { stream: true });
-        }
+        for await (const piece of source(message, previous)) queue += piece;
       } catch (err) { failed = true; }
       done = true;
     })();
@@ -250,7 +257,7 @@ PAGE = r"""<!DOCTYPE html>
     caret.remove();
     if (failed) {
       row.classList.add('error');
-      text.textContent = shown ? shown + ' …(връзката прекъсна)' : 'Няма връзка с модела. Пуснат ли е app.py?';
+      text.textContent = shown ? shown + ' …(връзката прекъсна)' : 'Моделът не отговори. Опитай пак.';
     } else if (!shown.trim()) {
       text.textContent = '(празен отговор)';
     }
@@ -275,7 +282,7 @@ PAGE = r"""<!DOCTYPE html>
 </script>
 </body>
 </html>
-""".replace("__PARAMS__", f"{model.num_parameters():,}".replace(",", " "))
+""".replace("__WHERE__", "работи локално").replace("__PARAMS__", f"{model.num_parameters():,}".replace(",", " "))
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -328,7 +335,8 @@ if __name__ == "__main__":
     url = f"http://{HOST}:{PORT}"
     server = ThreadingHTTPServer((HOST, PORT), Handler)
     print(f"Интерфейсът е на {url}  (Ctrl+C за спиране)")
-    webbrowser.open(url)
+    if HOST == "127.0.0.1":
+        webbrowser.open(url)
     try:
         server.serve_forever()
     except KeyboardInterrupt:

@@ -11,6 +11,7 @@ CARD = """---
 language: bg
 library_name: pytorch
 pipeline_tag: text-generation
+thumbnail: https://huggingface.co/Kirsko/krisko-purvi/resolve/main/avatar.png
 tags:
   - from-scratch
   - tiny

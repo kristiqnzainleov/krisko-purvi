@@ -1,6 +1,12 @@
 # Криско Първи
 
+![Криско Първи](avatar.png)
+
 Мъничък чат модел на български, написан и обучен от нулата от Кристиян Зайнелов на 12.11.2026.
+
+**Пробвай го направо в браузъра:** https://huggingface.co/spaces/Kirsko/krisko-purvi
+
+Моделът в HuggingFace: https://huggingface.co/Kirsko/krisko-purvi · Кодът в GitHub: https://github.com/kristiqnzainleov/krisko-purvi
 
 Това е учебен проект: моделът разпознава ограничен брой теми и отговаря със заучени реплики. Не е асистент с общи знания.
 

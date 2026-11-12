@@ -2,3 +2,7 @@
 __pycache__/
 model.backup/
 .DS_Store
+space/
+# версията за браузър живее само в HuggingFace Space
+krisko.js
+deploy_space.py
