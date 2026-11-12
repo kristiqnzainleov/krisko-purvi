@@ -26,7 +26,9 @@ def reply_stream(message: str, context=None):
         before_a = tokenizer.encode(context[1].strip()[:70])
         prompt = [tokenizer.user] + before_q + [tokenizer.bot] + before_a
     prompt += [tokenizer.user] + tokenizer.encode(message.strip().lower()[:60]) + [tokenizer.bot]
-    for token in model.stream(prompt, tokenizer.eos, top_p=TOP_P):
+    # При сметки няма място за случайност: взима се винаги най-вероятният символ.
+    top_p = None if any(ch.isdigit() for ch in message) else TOP_P
+    for token in model.stream(prompt, tokenizer.eos, top_p=top_p):
         yield tokenizer.decode([token])
 
 
