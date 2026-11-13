@@ -2,7 +2,7 @@
  "dim": 128,
  "layers": 3,
  "heads": 4,
- "block_size": 128,
+ "block_size": 256,
  "vocab": [
   "<pad>",
   "<user>",

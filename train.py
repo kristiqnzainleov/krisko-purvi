@@ -1,6 +1,6 @@
 """Обучава собствения мъничък модел (model.py) от нулата.
 
-Пускане:      .venv/bin/python train.py              (отначало, около 12 минути)
+Пускане:      .venv/bin/python train.py              (отначало)
 Дообучаване:  .venv/bin/python train.py --continue   (върху сегашния модел, 2-3 минути;
               за нови реплики, стига да не съдържат нови символи)
 Резултат: папка ./model (config.json + model.safetensors).
@@ -18,14 +18,15 @@ from model import CharTokenizer, TinyLM, load, save
 
 CONTINUE = "--continue" in sys.argv
 
-# Пълното обучение прави големия вариант с контекст (4 слоя). При --continue се дообучава
-# сегашният модел такъв, какъвто е, затова настройките се четат от него.
-config = dict(dim=128, layers=4, heads=4, block_size=256)
+# Прозорецът е 256 символа, за да се побере и предишната размяна (нужна е, когато човек каже
+# "грешно е" и моделът трябва да провери последния си отговор). При --continue останалите
+# настройки се четат от сегашния модел.
+config = dict(dim=128, layers=3, heads=4, block_size=256)
 if CONTINUE:
     with open("model/config.json", encoding="utf-8") as f:
         saved = json.load(f)
     config = {key: saved[key] for key in config}
-WITH_CONTEXT = config["block_size"] >= 256             # моделът вижда ли и предишната размяна
+    config["block_size"] = max(config["block_size"], 256)   # позициите са синусоидални – може да расте
 LAYERS, LAYERS_WORD = config["layers"], {2: "два", 3: "три", 4: "четири"}.get(config["layers"], str(config["layers"]))
 
 torch.manual_seed(0)
@@ -405,117 +406,118 @@ for a in range(11):                                    # "две плюс две
             singles += [(vary(random.choice(["колко е ", "колко е ", "колко прави ", ""]) + q, True, typos=False),
                          math_answer(op, a, b), "сметка") for _ in range(4)]
 
-# ---- 1б. Контекст: отговорът зависи и от предишната размяна ----------------
+# ---- 1б. "Грешно е": моделът проверява последния си отговор ---------------
+# Когато човек каже, че отговорът е грешен, моделът вижда предишната размяна, пресмята наново
+# и или се извинява и дава верния отговор, или казва, че не е сгрешил.
 # Пример за обучение: (предишна размяна или None, въпрос, отговор)
-GENERIC = "За какво питаш? Кажи ми малко повече."
-JOKES = TOPICS["виц"][1]
-FACTS = {"създател", "дата", "име", "кой си", "години", "технология", "ползвано", "архитектура", "сметка",
-         "човек ли си", "къде живееш"}
+WRONG_SAYS = ["грешно е", "грешно", "това е грешно", "сгреши", "ти сгреши", "не е вярно", "това не е вярно", "грешиш",
+              "бъркаш", "сбърка", "не е така", "грешен отговор", "това е грешка", "направи грешка", "не си прав",
+              "грешка", "имаш грешка", "объркал си", "не е правилно", "неправилно", "сгрешил си", "пак сгреши"]
+NOT_WRONG = "Не съм сгрешил. Сигурен съм в отговора си."
+SORRY = "Извинявай, сгреших! "
 
 
-def follow_up(kind, ctx):
-    """Отговор на кратък въпрос според това за какво е било говорено преди (ctx може да е None)."""
-    about = ctx[2] if ctx else None
-    if kind == "кога":
-        return CREATED if about in ("създател", "кой си", "име", "архитектура") else GENERIC
-    if kind == "кой":
-        return CREATOR if about in ("дата", "години", "технология", "ползвано", "архитектура") else GENERIC
-    if kind == "коя":
-        return "Яни е най-добрата приятелка на света." if about == "яни" else GENERIC
-    if kind == "наистина":
-        if about == "яни":
-            return "Да, естествено, това си е факт."
-        if about == "виц":
-            return "Не, това беше шега!"
-        return "Да, напълно сигурен съм!" if about in FACTS else "Да, наистина!"
-    if kind == "защо":
-        return {"вкус": "Защото съм програма и не мога да опитам.",
-                "непознато": "Защото съм малък модел и знам малко неща.",
-                "яни": "Защото Яни е страхотна!",
-                "любимо": "Защото е цветът на очилата на Кристиян!"}.get(about, "Не знам защо, просто така съм обучен.")
-    if kind == "името ми":
-        return f"Казваш се {about[4:]}." if about and about.startswith("име:") else "Още не си ми казал името си."
-    if kind == "повтори":
-        return ctx[1] if ctx else "Още нищо не съм казал."
-    if kind == "още виц":
-        return JOKES[1 - JOKES.index(ctx[1])] if about == "виц" else "Още какво? Кажи ми малко повече."
-    if kind == "слаб виц":
-        return "Ще се упражнявам още!" if about == "виц" else "Съжалявам, ще се постарая повече."
+def says_wrong():
+    return (random.choice(["", "", "", "не, ", "хей, ", "ама ", "криско, ", "е, ", "чакай, "]) + random.choice(WRONG_SAYS)
+            + random.choice(["", "", "", "!", ".", " бе", ", криско", " май", "!!"]))
 
 
-FOLLOW_UPS = {   # тема -> (начини на питане, теми на предишната размяна, при които отговорът е специален)
-    "кога": (["а кога", "кога", "а кога стана това", "кога беше това", "и кога", "а кога те създаде"],
-             ["създател", "кой си", "име", "архитектура"]),
-    "кой": (["а кой", "кой", "кой е той", "а кой го направи", "и кой", "а кой те направи"],
-            ["дата", "години", "технология", "ползвано", "архитектура"]),
-    "коя": (["коя е тя", "а коя е тя", "коя", "а коя"], ["яни"]),
-    "наистина": (["наистина ли", "сериозно ли", "сигурен ли си", "вярно ли е", "честно ли", "така ли"],
-                 ["яни", "виц"] + sorted(FACTS)),
-    "защо": (["защо", "а защо", "защо така", "защо бе", "и защо"], ["вкус", "непознато", "яни", "любимо"]),
-    "името ми": (["как се казвам", "кой съм аз", "помниш ли името ми", "как ми е името", "кажи ми името",
-                  "как се казвам аз", "знаеш ли как се казвам"], ["име:"]),
-    "повтори": (["повтори", "какво каза", "пак го кажи", "не разбрах", "я пак", "повтори моля", "кажи го пак"], []),
-    "още виц": (["още един", "кажи още един", "друг", "кажи друг", "още", "още един виц"], ["виц"]),
-    "слаб виц": (["не е смешно", "слаб виц", "не беше смешно", "не ми е смешно"], ["виц"]),
-}
-by_topic = {}
-for single in singles:
-    by_topic.setdefault("име:" if single[2].startswith("име:") else single[2], []).append(single)
+def spoil(result):
+    """Грешен резултат, който прилича на истинска грешка в сметката."""
+    while True:
+        kind, digits = random.random(), str(abs(result))
+        if kind < 0.35:
+            wrong = result + random.choice([-2, -1, 1, 2])
+        elif kind < 0.6:
+            wrong = result + random.choice([-100, -20, -10, 10, 20, 100])
+        elif kind < 0.75 and len(digits) > 1:
+            i = random.randrange(len(digits) - 1)
+            wrong = int(digits[:i] + digits[i + 1] + digits[i] + digits[i + 2:]) * (-1 if result < 0 else 1)
+        elif kind < 0.85 and len(digits) > 1:
+            wrong = int(digits[:-1]) * (-1 if result < 0 else 1)
+        elif kind < 0.9:
+            wrong = -result
+        else:
+            i = random.randrange(len(digits))
+            wrong = int(digits[:i] + random.choice("0123456789") + digits[i + 1:]) * (-1 if result < 0 else 1)
+        if wrong != result:
+            return wrong
 
 
-def override(ctx, current):
-    """Обикновена реплика, чийто отговор се променя заради предишната размяна."""
-    if current[2] == "смях" and ctx[2] == "виц":
-        return "Радвам се, че ти хареса!"
-    if ctx[2] == "вкус" and ctx[1].endswith("А ти?"):
-        if current[2] == "да":
-            return "Супер! Хубаво е да имаш любими неща."
-        if current[2] == "не":
-            return "Е, всеки с вкуса си."
-    return current[1]
+def math_fix_answer(op, a, b, said):
+    """Отговорът на "грешно е" след сметка: черновата пресмята наново, после сравнява."""
+    word, _, compute = MATH[op]
+    result = compute(a, b)
+    draft = ("-" if result < 0 else "") + str(abs(result))[::-1]
+    if said == result:
+        return f"[{draft}]Не съм сгрешил. {a} {word} {b} наистина е {result}."
+    return f"[{draft}]{SORRY}{a} {word} {b} е {result}."
+
+
+def math_fix():
+    op = random.choice("++--**/")
+    while True:
+        if op in "+-":
+            a, b = random_pair(99 if random.random() < 0.5 else 999)
+        else:
+            a, b = random.choice(times_pairs)
+        if (a, b) not in hidden.get("*" if op == "/" else op, ()) and not (op == "/" and b == 0):
+            break
+    if op == "/":
+        a = a * b
+    word, _, compute = MATH[op]
+    said = compute(a, b) if random.random() < 0.5 else spoil(compute(a, b))
+    return ((math_example(op, a, b)[0], f"{a} {word} {b} е {said}."), says_wrong(), math_fix_answer(op, a, b, said))
+
+
+talk = [x for x in singles if not x[1].startswith("[")]              # разговорните реплики
+
+
+def valid_answers(record):
+    topic = record[2]
+    if topic in TOPICS:
+        return TOPICS[topic][1]
+    return {"непознато": UNKNOWN_REPLIES, "вкус": TASTE_REPLIES}.get(topic, [record[1]])
+
+
+def talk_fix():
+    record = random.choice(talk)
+    valid, unknown = valid_answers(record), record[2] == "непознато"
+    if random.random() < 0.5:                          # отговорът е бил верен
+        said = random.choice(valid)
+        answer = "Не съм сгрешил, просто не знам отговора." if unknown else NOT_WRONG
+    else:                                              # отговорът е бил за нещо друго
+        while True:
+            said = random.choice(talk)[1]
+            if said not in valid:
+                break
+        answer = SORRY + ("Всъщност не знам отговора." if unknown else random.choice(valid))
+    return ((record[0], said), says_wrong(), answer)
 
 
 examples = [(None, q, a) for q, a, _ in singles]
-context_examples = []
-for _ in range(10000):                                 # същите реплики, но след случайна предишна размяна
-    ctx, current = random.choice(singles), random.choice(singles)
-    context_examples.append((ctx, current[0], override(ctx, current)))
-for pair in (("виц", "смях"), ("вкус", "да"), ("вкус", "не")):
-    for _ in range(300):
-        ctx, current = random.choice(by_topic[pair[0]]), random.choice(by_topic[pair[1]])
-        context_examples.append((ctx, current[0], override(ctx, current)))
-for kind, (questions, special) in FOLLOW_UPS.items():
-    for _ in range(800):
-        roll = random.random()
-        if roll < 0.1:
-            ctx = None
-        elif roll < 0.6 and special:
-            ctx = random.choice(by_topic[random.choice(special)])
-        else:
-            ctx = random.choice(singles)
-        q = random.choice(questions)
-        q = q if random.random() < 0.3 else vary(q, True, typos=False)
-        context_examples.append((ctx, q, follow_up(kind, ctx)))
-if WITH_CONTEXT:
-    examples += context_examples
+examples += [(None, says_wrong(), "За кое говориш? Още нищо не съм казал.") for _ in range(500)]
+examples += [math_fix() for _ in range(36000)]
+examples += [talk_fix() for _ in range(14000)]
 
 # ---- 2. Токенизатор: по един токен на символ -------------------------------
 all_text = "".join(q + a + (ctx[0] + ctx[1] if ctx else "") for ctx, q, a in examples)
 if CONTINUE:
     model, tokenizer = load("model")                   # продължаваме от сегашния модел и неговия речник
     missing = sorted(set(all_text) - set(tokenizer.itos))
-    if missing:                                        # нови символи: речникът и моделът порастват с по един ред
+    if missing:                                        # нови символи: речникът порасва с по един ред
         print("Нови символи в речника:", " ".join(missing))
-        old = model.state_dict()
         tokenizer = CharTokenizer(tokenizer.itos[5:] + missing)
-        model = TinyLM(len(tokenizer), **config)
-        grown = model.state_dict()
-        for key, value in old.items():
-            if grown[key].shape == value.shape:
-                grown[key] = value
-            else:
-                grown[key][: value.shape[0]] = value
-        model.load_state_dict(grown)
+    # Строим модела наново с текущите настройки (напр. по-дълъг прозорец) и пренасяме теглата.
+    old = model.state_dict()
+    model = TinyLM(len(tokenizer), **config)
+    grown = model.state_dict()
+    for key, value in old.items():
+        if grown[key].shape == value.shape:
+            grown[key] = value
+        else:
+            grown[key][: value.shape[0]] = value
+    model.load_state_dict(grown)
 else:
     tokenizer = CharTokenizer.from_texts([all_text, LETTERS])
     model = TinyLM(len(tokenizer), **config)
@@ -527,7 +529,7 @@ def encode_prompt(q, ctx=None):
     return before + [tokenizer.user] + tokenizer.encode(q) + [tokenizer.bot]
 
 
-inputs, targets, is_math = [], [], []
+inputs, targets, group = [], [], []
 for ctx, q, a in examples:
     question = encode_prompt(q, ctx)
     answer = tokenizer.encode(a) + [tokenizer.eos]
@@ -535,16 +537,19 @@ for ctx, q, a in examples:
     if len(row) > config["block_size"]:
         continue
     pad = config["block_size"] - len(row)
-    is_math.append(a.startswith("["))
+    group.append(2 if ctx else 1 if a.startswith("[") else 0)   # 0 реплика, 1 сметка, 2 поправка
     inputs.append(row[:-1] + [tokenizer.pad] * (pad + 1))
     # Учим само отговора: върху въпроса и празното място няма оценка (-100).
     targets.append([-100] * (len(question) - 1) + answer + [-100] * (pad + 1))
 device = "mps" if torch.backends.mps.is_available() else "cpu"   # GPU-то на Mac, ако го има
 inputs, targets = torch.tensor(inputs, device=device), torch.tensor(targets, device=device)
 lengths = (inputs != tokenizer.pad).sum(1)
-# Сметките са много повече от репликите. За да не ги изместят, 30% от всяка порция са реплики.
-is_math = torch.tensor(is_math)
-weights = torch.where(is_math, 0.7 / max(int(is_math.sum()), 1), 0.3 / max(int((~is_math).sum()), 1))
+# Сметките са много повече от репликите. За да не ги изместят, всяка порция е смесена:
+# 25% реплики, 45% сметки, 30% поправки.
+group = torch.tensor(group)
+weights = torch.zeros(len(group))
+for g, share in ((0, 0.25), (1, 0.45), (2, 0.30)):
+    weights[group == g] = share / max(int((group == g).sum()), 1)
 
 # ---- 3. Модел ---------------------------------------------------------------
 model = model.to(device)
@@ -612,28 +617,6 @@ EXTRA = {   # въпрос -> точен очакван отговор
     "името ми е яни": "Приятно ми е, Яни! Аз съм Криско Първи.",
     "обичаш ли банани": TASTE_REPLIES, "харесваш ли рок музика": TASTE_REPLIES,
 }
-CONTEXT_TESTS = [   # (предишен въпрос, предишен отговор, въпрос, очакван отговор)
-    ("кой е твоят създател", CREATOR, "а кога?", CREATED),
-    ("кога си създаден", CREATED, "а кой?", CREATOR),
-    ("коя е най-добрата приятелка на света", TOPICS["яни"][1][0], "наистина ли?", "Да, естествено, това си е факт."),
-    ("коя е най-добрата приятелка на света", TOPICS["яни"][1][1], "знаеш знаеш", "Да, естествено, това си е факт."),
-    ("казвам се иван", "Приятно ми е, Иван! Аз съм Криско Първи.", "как се казвам?", "Казваш се Иван."),
-    ("аз се казвам яни", "Приятно ми е, Яни! Аз съм Криско Първи.", "помниш ли името ми", "Казваш се Яни."),
-    ("здрасти", "Здрасти!", "как се казвам?", "Още не си ми казал името си."),
-    ("кажи виц", JOKES[0], "още един", JOKES[1]),
-    ("кажи виц", JOKES[0], "хаха", "Радвам се, че ти хареса!"),
-    ("обичаш ли пица", TASTE_REPLIES[0], "защо?", "Защото съм програма и не мога да опитам."),
-    ("кой е любимият ти цвят", "Любимият ми цвят е жълтото!", "а защо?", "Защото е цветът на очилата на Кристиян!"),
-    ("колко е 7 по 8", "7 по 8 е 56.", "повтори", "7 по 8 е 56."),
-    ("как си", "Добре съм, благодаря! А ти?", "и аз така", "Радвам се да го чуя!"),
-    ("как си", "Добре съм, благодаря! А ти?", "епа добре", "Радвам се!"),
-    (None, None, "а кога?", GENERIC),
-    ("здрасти", "Здрасти!", "кой е твоят създател", CREATOR),
-    ("кажи виц", JOKES[1], "как се казваш", TOPICS["име"][1]),
-    ("колко е 2 + 2", "2 плюс 2 е 4.", "коя е най-добрата приятелка на света", TOPICS["яни"][1]),
-]
-
-
 def ask(q, ctx=None):
     text = tokenizer.decode(model.generate(encode_prompt(q, ctx), tokenizer.eos))
     return re.sub(r"\[[^\]]*\]?", "", text)             # без черновата в скоби
@@ -655,16 +638,6 @@ for q, expected in EXTRA.items():
     if not ok:
         print(f"  грешка: {q!r} -> {answer!r}")
 print(f"Непознати формулировки: {right}/{total} верни")
-
-right = 0
-for before_q, before_a, q, expected in CONTEXT_TESTS if WITH_CONTEXT else []:
-    answer = ask(q, (before_q, before_a) if before_q else None)
-    ok = answer == expected or (isinstance(expected, list) and answer in expected)
-    right += ok
-    if not ok:
-        print(f"  грешка: [{before_q!r} -> {before_a!r}] {q!r} -> {answer!r}")
-if WITH_CONTEXT:
-    print(f"Въпроси с контекст: {right}/{len(CONTEXT_TESTS)} верни")
 
 # ---- 7. Математика ----------------------------------------------------------
 def math_score(op, pairs, sign=None):
@@ -696,3 +669,54 @@ everyday = {"2+2": 4, "1+1": 2, "2+2=?": 4, "100+100": 200, "1000-1": 999, "ко
             "250 + 250": 500, "колко е 12 по 11": 132, "144:12": 12, "3*3": 9, "колко е 500-250": 250, "81/9": 9, "6*7=": 42}
 wrong = {q: ask(q) for q, result in everyday.items() if not ask(q).endswith(f" е {result}.")}
 print(f"Всекидневни сметки: {len(everyday) - len(wrong)}/{len(everyday)} верни" + (f"   грешни: {wrong}" if wrong else ""))
+
+# ---- 8. "Грешно е" ----------------------------------------------------------
+def fix_score(cases):
+    """cases: (въпрос, казан отговор, очакван отговор на "грешно е")"""
+    wrong = [(q, said, got) for q, said, want in cases for got in [ask("грешно е", (q, said))] if got != want]
+    return len(cases) - len(wrong), len(cases), wrong[:2]
+
+
+def strip_draft(text):
+    return re.sub(r"\[[^\]]*\]", "", text)
+
+
+random.seed(321)
+made_up = {True: [], False: []}                        # сметки с нарочно сложена или липсваща грешка
+for _ in range(300):
+    op = random.choice("+-")
+    a, b = random_pair(999)
+    word, _, compute = MATH[op]
+    said = compute(a, b) if random.random() < 0.5 else spoil(compute(a, b))
+    made_up[said == compute(a, b)].append((f"колко е {a} {op} {b}", f"{a} {word} {b} е {said}.",
+                                           strip_draft(math_fix_answer(op, a, b, said))))
+for label, cases in (("Вярна сметка -> казва, че не е сгрешил", made_up[True]),
+                     ("Грешна сметка -> извинява се и дава верния отговор", made_up[False])):
+    good, count, wrong = fix_score(cases)
+    print(f"{label}: {good}/{count}" + (f"   например: {wrong}" if wrong else ""))
+
+# Истинските грешки на самия модел: намира ли ги, когато му кажат?
+own_right, own_wrong = [], []
+for op, pairs in (("*", HELD_OUT["*"]), ("/", exact[:150]), ("-", [random_pair(999) for _ in range(150)])):
+    word, _, compute = MATH[op]
+    sign = {"*": "по", "/": "делено на", "-": "-"}[op]
+    for a, b in pairs:
+        q = f"колко е {a} {sign} {b}"
+        said, truth = ask(q), f"{a} {word} {b} е {compute(a, b)}."
+        (own_right if said == truth else own_wrong).append(
+            (q, said, f"Не съм сгрешил. {a} {word} {b} наистина е {compute(a, b)}." if said == truth else SORRY + truth))
+for label, cases in (("Свои верни отговори -> казва, че не е сгрешил", own_right),
+                     ("Свои грешни отговори -> извинява се и се поправя", own_wrong)):
+    good, count, wrong = fix_score(cases)
+    print(f"{label}: {good}/{count}" + (f"   например: {wrong}" if wrong else ""))
+
+talk_cases = {True: [], False: []}
+random.seed(55)
+for _ in range(200):
+    (q, said), _, want = talk_fix()
+    talk_cases[want.startswith("Не съм")].append((q, said, want))
+for label, cases in (("Верен отговор в разговор -> казва, че не е сгрешил", talk_cases[True]),
+                     ("Грешен отговор в разговор -> извинява се", talk_cases[False])):
+    wrong = [(q, said, got) for q, said, want in cases for got in [ask("грешно е", (q, said))]
+             if not got.startswith("Не съм" if want.startswith("Не съм") else "Извинявай")]
+    print(f"{label}: {len(cases) - len(wrong)}/{len(cases)}" + (f"   например: {wrong[:2]}" if wrong else ""))
